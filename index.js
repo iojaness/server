@@ -2,33 +2,22 @@ import express from 'express';
 import cors from 'cors';
 import pg from 'pg';
 
+if (!process.env.DATABASE_URL) {
+  console.error('Falta DATABASE_URL. Agrega Postgres en Railway y referenciala en el servicio.');
+  process.exit(1);
+}
+
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Railway inyecta DATABASE_URL al agregar el plugin de Postgres.
-// Con la URL pública (proxy) hace falta SSL: define PGSSL=true.
+// Con la URL publica (proxy) de Railway hace falta SSL: define PGSSL=true.
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.PGSSL === 'true' ? { rejectUnauthorized: false } : false,
 });
 
-// [nombre, categoria, descripcion, precio en centavos]
-const SEED = [
-  ['Minifigura Goku Ultra Instinto', 'Anime', 'Figura articulada de 12 cm con base y efecto de aura.', 2499],
-  ['Minifigura Naruto Modo Sabio', 'Anime', 'Figura de PVC de 10 cm, pintada a mano.', 1999],
-  ['Luffy Gear 5 Mini', 'Anime', 'Figura coleccionable de 11 cm con cabeza intercambiable.', 2299],
-  ['Funko Spider-Man', 'Minifiguras', 'Vinilo de 9 cm en caja de coleccion.', 1599],
-  ['Funko Darth Vader', 'Minifiguras', 'Edicion con casco desmontable.', 1799],
-  ['Mini Batman 1989', 'Minifiguras', 'Figura de 10 cm con capa de tela.', 2099],
-  ['Amiibo Link', 'Videojuegos', 'Figura NFC compatible con Nintendo Switch.', 1899],
-  ['Master Chief Mini', 'Videojuegos', 'Figura de 12 cm con rifle y casco.', 2699],
-  ['Pixel Heart Llavero', 'Videojuegos', 'Llavero metalico de corazon pixelado.', 699],
-  ['Batman: Year One', 'Comics', 'Tomo en tapa dura, edicion coleccionista.', 2999],
-  ['Saga Vol. 1', 'Comics', 'Tomo en tapa blanda, edicion en espanol.', 1699],
-  ['Watchmen', 'Comics', 'Edicion absoluta con sobrecubierta.', 3999],
-];
-
+// Los precios son pesos colombianos enteros (COP no usa decimales).
 async function init() {
   await pool.query(`
     create table if not exists products (
@@ -36,27 +25,16 @@ async function init() {
       name text not null,
       category text not null,
       description text not null,
-      price_cents integer not null,
+      price integer not null,
       image text not null
     )`);
   await pool.query(`
     create table if not exists orders (
       id text primary key,
-      total_cents integer not null,
+      total integer not null,
       items jsonb not null,
       created_at timestamptz not null default now()
     )`);
-
-  const { rows } = await pool.query('select count(*)::int as n from products');
-  if (rows[0].n > 0) return;
-  for (const [name, category, description, price] of SEED) {
-    // Imagenes de relleno: reemplazalas por las URLs reales de tu catalogo.
-    const image = `https://picsum.photos/seed/${encodeURIComponent(name)}/600/600`;
-    await pool.query(
-      'insert into products (name, category, description, price_cents, image) values ($1,$2,$3,$4,$5)',
-      [name, category, description, price, image]
-    );
-  }
 }
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
@@ -64,7 +42,7 @@ app.get('/health', (_req, res) => res.json({ ok: true }));
 app.get('/products', async (_req, res) => {
   try {
     const { rows } = await pool.query(
-      'select id, name, category, description, price_cents as "priceCents", image from products order by id'
+      'select id, name, category, description, price, image from products order by id'
     );
     res.json(rows);
   } catch (err) {
@@ -84,7 +62,7 @@ app.post('/orders', async (req, res) => {
   try {
     const ids = items.map((i) => i.productId);
     const { rows: prods } = await pool.query(
-      'select id, name, price_cents from products where id = any($1)',
+      'select id, name, price from products where id = any($1)',
       [ids]
     );
     const byId = new Map(prods.map((p) => [p.id, p]));
@@ -95,18 +73,18 @@ app.post('/orders', async (req, res) => {
     // El precio se toma de la base, nunca del cliente.
     const lines = items.map((i) => {
       const p = byId.get(i.productId);
-      return { productId: p.id, name: p.name, priceCents: p.price_cents, qty: i.qty };
+      return { productId: p.id, name: p.name, price: p.price, qty: i.qty };
     });
-    const total = lines.reduce((sum, l) => sum + l.priceCents * l.qty, 0);
+    const total = lines.reduce((sum, l) => sum + l.price * l.qty, 0);
 
     await pool.query(
-      `insert into orders (id, total_cents, items, created_at)
+      `insert into orders (id, total, items, created_at)
        values ($1, $2, $3, $4) on conflict (id) do nothing`,
       [id, total, JSON.stringify(lines), createdAt || new Date().toISOString()]
     );
 
     const { rows } = await pool.query(
-      'select id, total_cents as "totalCents", items, created_at as "createdAt" from orders where id = $1',
+      'select id, total, items, created_at as "createdAt" from orders where id = $1',
       [id]
     );
     res.status(201).json(rows[0]);
